@@ -8,12 +8,14 @@ import type { Leaf } from '@/types/leaf'
 import type { Paper } from '@/types/paper'
 import type { RepairOrder } from '@/types/repairOrder'
 import type { Binding } from '@/types/binding'
+import type { DeacidOrder } from '@/types/deacidOrder'
 import { BOOK_LEVEL_LABEL } from '@/types/book'
 import { BINDING_TYPE_LABEL, VOLUME_STATE_LABEL } from '@/types/volume'
 import { DAMAGE_TYPE_LABEL, LEAF_STATE_LABEL } from '@/types/leaf'
 import { PAPER_TYPE_LABEL, deltaELevel } from '@/types/paper'
 import { REPAIR_NAME_LABEL } from '@/types/repairOrder'
 import { BINDING_VERDICT_LABEL } from '@/types/binding'
+import { DEACID_METHOD_LABEL, DEACID_STATE_LABEL, needsDeacid } from '@/types/deacidOrder'
 import type { RestoreSnapshot } from './db'
 
 /** 触发浏览器下载 */
@@ -55,6 +57,15 @@ export interface ExportContext {
   papers: Paper[]
   repairOrders: RepairOrder[]
   bindings: Binding[]
+  deacidOrders: DeacidOrder[]
+}
+
+/** 取某册某叶号最新一张脱酸处理单（按处理次数 / 更新时间） */
+function latestDeacid(context: ExportContext, volumeId: string, leafNo: number): DeacidOrder | null {
+  const chain = context.deacidOrders
+    .filter((order) => order.volumeId === volumeId && order.leafNo === leafNo)
+    .sort((a, b) => (a.attempt === b.attempt ? a.updatedAt - b.updatedAt : a.attempt - b.attempt))
+  return chain.length === 0 ? null : chain[chain.length - 1]
 }
 
 /** 验收归档清单文本：按古籍 → 册次 → 书叶 → 工序展开 */
@@ -87,9 +98,16 @@ export function buildArchiveReport(context: ExportContext): string {
       leaves.forEach((leaf) => {
         const orders = context.repairOrders.filter((order) => order.leafId === leaf.id)
         const done = orders.filter((order) => order.state === 'done').length
+        const deacid = latestDeacid(context, volume.id, leaf.leafNo)
+        const deacidText = needsDeacid(leaf.phValue)
+          ? deacid
+            ? `检测室：${deacid.method ? DEACID_METHOD_LABEL[deacid.method] : '方式待补'}·复测 ${deacid.retestPh ?? '未测'}·${DEACID_STATE_LABEL[deacid.state]}`
+            : '检测室：未送检'
+          : '检测室：无需脱酸'
         lines.push(
-          `      · 第 ${leaf.leafNo} 叶　${DAMAGE_TYPE_LABEL[leaf.damageType]}　${leaf.damageAreaCm2} cm²　pH ${leaf.phValue}　${LEAF_STATE_LABEL[leaf.state]}　工序 ${done}/${orders.length}`
+          `      · 第 ${leaf.leafNo} 叶　${DAMAGE_TYPE_LABEL[leaf.damageType]}　${leaf.damageAreaCm2} cm²　原值 pH ${leaf.phValue}　${LEAF_STATE_LABEL[leaf.state]}　工序 ${done}/${orders.length}`
         )
+        lines.push(`         ${deacidText}（原值 pH 不被复测覆盖）`)
       })
     })
     lines.push('')
@@ -112,8 +130,12 @@ export function exportLeafLedgerCsv(context: ExportContext): string {
     '叶号',
     '破损类型',
     '面积(cm²)',
-    'pH',
+    '原值pH(修复室)',
     '书叶状态',
+    '脱酸方式(检测室)',
+    '复测pH(检测室)',
+    '脱酸结论',
+    '处理次数',
     '补纸纸种',
     '帘纹',
     '厚度(mm)',
@@ -138,6 +160,8 @@ export function exportLeafLedgerCsv(context: ExportContext): string {
           .sort((a, b) => a.seq - b.seq)
         const done = orders.filter((order) => order.state === 'done').length
         const last = orders[orders.length - 1]
+        const deacid = latestDeacid(context, volume.id, leaf.leafNo)
+        const attempt = context.deacidOrders.filter((order) => order.volumeId === volume.id && order.leafNo === leaf.leafNo).length
         lines.push(
           [
             book.title,
@@ -147,6 +171,10 @@ export function exportLeafLedgerCsv(context: ExportContext): string {
             leaf.damageAreaCm2,
             leaf.phValue,
             LEAF_STATE_LABEL[leaf.state],
+            deacid && deacid.method ? DEACID_METHOD_LABEL[deacid.method] : '',
+            deacid && deacid.retestPh !== null ? deacid.retestPh : '',
+            deacid ? DEACID_STATE_LABEL[deacid.state] : needsDeacid(leaf.phValue) ? '未送检' : '无需脱酸',
+            attempt,
             paper ? PAPER_TYPE_LABEL[paper.paperType] : '未选配',
             paper ? paper.laidPattern : '',
             paper ? paper.thicknessMm : '',

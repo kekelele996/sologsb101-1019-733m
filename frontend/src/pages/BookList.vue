@@ -16,6 +16,7 @@ import { useLeafStats } from '@/hooks/useLeafStats'
 import { useBookStore } from '@/stores/bookStore'
 import { useLeafStore } from '@/stores/leafStore'
 import { useRepairStore } from '@/stores/repairStore'
+import { useDeacidGate, GATE_BLOCK_LABEL } from '@/hooks/useDeacidGate'
 import {
   BOOK_LEVEL_COLOR,
   BOOK_LEVEL_LABEL,
@@ -43,6 +44,7 @@ const bookStore = useBookStore()
 const leafStore = useLeafStore()
 const repairStore = useRepairStore()
 const { statOf } = useLeafStats()
+const { gateOf } = useDeacidGate()
 const bindingTable = useIdbTable<Binding>((database) => database.bindings, { sortByUpdatedAt: false })
 
 const FILTER_KEYS = ['era', 'level'] as const
@@ -184,6 +186,15 @@ async function removeVolume(volume: Volume): Promise<void> {
 }
 
 async function advanceVolume(volume: Volume): Promise<void> {
+  // 修复中 → 已装订：一册书叶脱酸复测全部达标才放行（历史空单 / 失败 / 缺单均拦截）
+  if (volume.state === 'repairing') {
+    const gate = gateOf(volume.id)
+    if (gate.needCount > 0 && !gate.ready) {
+      const detail = gate.blocks.map((block) => `第${block.leafNo}叶（${GATE_BLOCK_LABEL[block.reason]}）`).join('、')
+      ElMessage.error(`脱酸复测未全部达标，暂不放行装订：${detail}`)
+      return
+    }
+  }
   await bookStore.advanceVolumeState(volume.id)
   ElMessage.success(`第 ${volume.volumeNo} 册状态已推进`)
 }

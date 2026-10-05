@@ -16,6 +16,7 @@ import { useIdbTable } from '@/hooks/useIdbTable'
 import { useLeafStats } from '@/hooks/useLeafStats'
 import { useBookStore } from '@/stores/bookStore'
 import { useLeafStore } from '@/stores/leafStore'
+import { useDeacidGate, leafNeedsDeacid } from '@/hooks/useDeacidGate'
 import { PAPER_TYPE_LABEL, type Paper } from '@/types/paper'
 import {
   DAMAGE_TYPE_OPTIONS,
@@ -31,6 +32,11 @@ import {
 } from '@/types/leaf'
 import { BINDING_TYPE_LABEL, VOLUME_STATE_LABEL, isVolumeLocked } from '@/types/volume'
 import { useRepairStore } from '@/stores/repairStore'
+import {
+  DEACID_METHOD_LABEL,
+  DEACID_STATE_LABEL,
+  deacidStateColor
+} from '@/types/deacidOrder'
 
 const route = useRoute()
 const router = useRouter()
@@ -38,6 +44,7 @@ const bookStore = useBookStore()
 const leafStore = useLeafStore()
 const repairStore = useRepairStore()
 const { statOf } = useLeafStats()
+const { latestOrderOf, gateOf } = useDeacidGate()
 const paperTable = useIdbTable<Paper>((database) => database.papers, { sortByUpdatedAt: false })
 
 const bookId = computed(() => String(route.params.id ?? ''))
@@ -101,6 +108,7 @@ const rows = computed(() => {
 })
 
 const stat = computed(() => (bookStore.currentVolumeId ? statOf(bookStore.currentVolumeId) : null))
+const deacidGate = computed(() => (bookStore.currentVolumeId ? gateOf(bookStore.currentVolumeId) : null))
 
 /* ----------------------------- 书叶表单 ----------------------------- */
 const dialog = ref(false)
@@ -200,6 +208,33 @@ function paperText(leafId: string): string {
   return `${PAPER_TYPE_LABEL[paper.paperType]} · ΔE ${paper.deltaE}`
 }
 
+/**
+ * 检测室脱酸状态（只读回显）：
+ * 修复室只留送检前原值 pH，复测值只从检测室处理单读取，绝不回盖。
+ */
+function deacidInfo(volumeId: string, leafNo: number) {
+  return latestOrderOf(volumeId, leafNo)
+}
+
+function deacidText(volumeId: string, leafNo: number): string {
+  const order = latestOrderOf(volumeId, leafNo)
+  if (!order) return leafNeedsDeacidSafe(volumeId, leafNo) ? '未送检' : '无需脱酸'
+  const method = order.method ? DEACID_METHOD_LABEL[order.method] : '方式待补'
+  const retest = order.retestPh !== null ? `复测 ${order.retestPh}` : '待复测'
+  return `${method} · ${retest}`
+}
+
+function leafNeedsDeacidSafe(volumeId: string, leafNo: number): boolean {
+  return leafStore
+    .leavesOfVolume(volumeId)
+    .filter((leaf) => leaf.leafNo === leafNo)
+    .some((leaf) => leafNeedsDeacid(leaf))
+}
+
+function goDeacid(): void {
+  void router.push('/deacid')
+}
+
 function phTag(ph: number): { label: string; color: string } {
   return phLevel(ph)
 }
@@ -248,6 +283,23 @@ function stateColor(state: string): string {
         description="如需继续登记破损，请先在古籍台账中把册次状态回退为「修复中」。"
       />
 
+      <!-- 脱酸装订闸门：全部复测达标修复室才放行；不达标先摆叶号 -->
+      <el-alert
+        v-if="deacidGate && deacidGate.needCount > 0"
+        :type="deacidGate.ready ? 'success' : 'error'"
+        show-icon
+        :closable="false"
+        style="margin-bottom: 12px"
+        :title="
+          deacidGate.ready
+            ? `检测室复测 ${deacidGate.passedCount}/${deacidGate.needCount} 叶全部达标，可进装订`
+            : `脱酸复测 ${deacidGate.passedCount}/${deacidGate.needCount} 叶达标，未达标叶不给装订：` +
+              deacidGate.blocks.map((block) => `第${block.leafNo}叶`).join('、')
+        "
+      >
+        <el-button size="small" text type="primary" @click="goDeacid">前往检测室脱酸台账</el-button>
+      </el-alert>
+
       <el-card shadow="never" style="margin-bottom: 14px">
         <div class="gb-toolbar">
           <span class="gb-muted">册次：</span>
@@ -271,6 +323,13 @@ function stateColor(state: string): string {
         <StatBadge label="待修" :value="stat?.pendingCount ?? 0" suffix="条" />
         <StatBadge label="已修复" :value="stat?.repairedCount ?? 0" suffix="条" tone="success" />
         <StatBadge label="工序完成率" :value="`${stat?.orderPercent ?? 0}%`" :percent="stat?.orderPercent ?? 0" tone="success" />
+        <StatBadge
+          v-if="deacidGate"
+          label="脱酸复测达标"
+          :value="`${deacidGate.passedCount}/${deacidGate.needCount}`"
+          suffix="叶"
+          :tone="deacidGate.ready ? 'success' : 'warning'"
+        />
       </div>
 
       <FilterBar
@@ -339,6 +398,30 @@ function stateColor(state: string): string {
             <template #default="{ row }">
               {{ repairStore.ordersOfLeaf(row.id).filter((order) => order.state === 'done').length }} /
               {{ repairStore.ordersOfLeaf(row.id).length }}
+            </template>
+          </el-table-column>
+          <el-table-column label="检测室脱酸（只读）" min-width="210">
+            <template #default="{ row }">
+              <div style="display: flex; flex-direction: column; gap: 2px">
+                <span class="gb-muted" style="font-size: 12px">原值 pH {{ row.phValue }} 不被复测值覆盖</span>
+                <template v-if="deacidInfo(row.volumeId, row.leafNo)">
+                  <el-tag
+                    size="small"
+                    effect="plain"
+                    round
+                    :style="{
+                      color: deacidStateColor(deacidInfo(row.volumeId, row.leafNo)!.state),
+                      borderColor: `${deacidStateColor(deacidInfo(row.volumeId, row.leafNo)!.state)}66`
+                    }"
+                  >
+                    {{ DEACID_STATE_LABEL[deacidInfo(row.volumeId, row.leafNo)!.state] }}
+                  </el-tag>
+                  <span class="gb-muted" style="font-size: 12px">{{ deacidText(row.volumeId, row.leafNo) }}</span>
+                </template>
+                <el-tag v-else size="small" effect="plain" round :type="leafNeedsDeacidSafe(row.volumeId, row.leafNo) ? 'danger' : 'info'">
+                  {{ deacidText(row.volumeId, row.leafNo) }}
+                </el-tag>
+              </div>
             </template>
           </el-table-column>
           <el-table-column label="操作" min-width="260">

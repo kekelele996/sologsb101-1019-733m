@@ -34,6 +34,12 @@ const routes: RouteRecordRaw[] = [
     meta: { title: '修复工序记录', icon: 'Tools' }
   },
   {
+    path: '/deacid',
+    name: 'deacid-ledger',
+    component: () => import('@/pages/DeacidLedger.vue'),
+    meta: { title: '检测室脱酸台账', icon: 'MagicStick' }
+  },
+  {
     path: '/export',
     name: 'export-view',
     component: () => import('@/pages/ExportView.vue'),

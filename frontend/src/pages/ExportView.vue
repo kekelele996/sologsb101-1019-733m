@@ -14,6 +14,8 @@ import { useLeafStats } from '@/hooks/useLeafStats'
 import { useBookStore } from '@/stores/bookStore'
 import { useLeafStore } from '@/stores/leafStore'
 import { useRepairStore } from '@/stores/repairStore'
+import { useDeacidStore } from '@/stores/deacidStore'
+import { useDeacidGate, GATE_BLOCK_LABEL } from '@/hooks/useDeacidGate'
 import {
   BINDING_METHOD_OPTIONS,
   BINDING_VERDICT_COLOR,
@@ -48,7 +50,9 @@ import {
 const bookStore = useBookStore()
 const leafStore = useLeafStore()
 const repairStore = useRepairStore()
+const deacidStore = useDeacidStore()
 const { totals } = useLeafStats()
+const { gateOf } = useDeacidGate()
 const bindingTable = useIdbTable<Binding>((database) => database.bindings, { sortByUpdatedAt: false })
 const paperTable = useIdbTable<Paper>((database) => database.papers, { sortByUpdatedAt: false })
 
@@ -93,10 +97,17 @@ const context = computed(() => ({
   leaves: leafStore.leaves,
   papers: paperTable.rows.value,
   repairOrders: repairStore.orders,
-  bindings: bindingTable.rows.value
+  bindings: bindingTable.rows.value,
+  deacidOrders: deacidStore.orders
 }))
 
 const archiveText = computed(() => buildArchiveReport(context.value))
+
+/** 装订脱酸闸门：一册书叶全部复测达标才放行（历史空单 / 失败 / 缺单均拦截） */
+const formGate = computed(() => (form.volumeId ? gateOf(form.volumeId) : null))
+const gateBlocksText = computed(() =>
+  (formGate.value?.blocks ?? []).map((block) => `第${block.leafNo}叶（${GATE_BLOCK_LABEL[block.reason]}）`).join('、')
+)
 
 /* ----------------------------- 装订表单 ----------------------------- */
 const dialog = ref(false)
@@ -130,6 +141,14 @@ async function submit(): Promise<void> {
   if (!form.volumeId) {
     ElMessage.warning('请选择册次')
     return
+  }
+  // 硬闸门：验收合格前，一册书叶必须脱酸复测全部达标（历史空单未补复测同样拦住）
+  if (form.verdict === 'pass') {
+    const gate = gateOf(form.volumeId)
+    if (gate.needCount > 0 && !gate.ready) {
+      ElMessage.error(`脱酸复测未全部达标，暂不放行装订：${gateBlocksText.value}`)
+      return
+    }
   }
   if (editing.value) {
     await bindingTable.update(editing.value.id, { ...form })
@@ -208,7 +227,7 @@ async function handleFile(event: Event): Promise<void> {
     return
   }
   await importSnapshot(parsed as RestoreSnapshot)
-  await Promise.all([bookStore.loadBooks(), bookStore.loadVolumes(), leafStore.loadLeaves(), repairStore.loadOrders()])
+  await Promise.all([bookStore.loadBooks(), bookStore.loadVolumes(), leafStore.loadLeaves(), repairStore.loadOrders(), deacidStore.loadOrders()])
   ElMessage.success('导入完成，数据已覆盖')
 }
 
@@ -223,7 +242,7 @@ async function handleReset(): Promise<void> {
     return
   }
   await resetDatabase()
-  await Promise.all([bookStore.loadBooks(), bookStore.loadVolumes(), leafStore.loadLeaves(), repairStore.loadOrders()])
+  await Promise.all([bookStore.loadBooks(), bookStore.loadVolumes(), leafStore.loadLeaves(), repairStore.loadOrders(), deacidStore.loadOrders()])
   ElMessage.success('已清空并重新载入演示数据')
 }
 
@@ -288,8 +307,23 @@ function verdictColor(verdict: string): string {
             @action="openCreate"
           />
           <el-table v-else :data="bindingTable.rows.value" size="small" border>
-            <el-table-column label="册次" min-width="180">
-              <template #default="{ row }">{{ volumeLabel(row.volumeId) }}</template>
+            <el-table-column label="册次" min-width="220">
+              <template #default="{ row }">
+                {{ volumeLabel(row.volumeId) }}
+                <el-tag
+                  v-if="row.verdict === 'pass'"
+                  size="small"
+                  effect="plain"
+                  round
+                  :type="gateOf(row.volumeId).ready || gateOf(row.volumeId).needCount === 0 ? 'success' : 'danger'"
+                  style="margin-left: 6px"
+                >
+                  脱酸
+                  {{ gateOf(row.volumeId).needCount === 0
+                    ? '无需处理'
+                    : `${gateOf(row.volumeId).passedCount}/${gateOf(row.volumeId).needCount}` }}
+                </el-tag>
+              </template>
             </el-table-column>
             <el-table-column prop="method" label="装订方式" width="130" />
             <el-table-column prop="finishDate" label="完工日期" width="120" sortable />
@@ -328,7 +362,7 @@ function verdictColor(verdict: string): string {
         <el-card shadow="never" style="margin-top: 16px">
           <template #header>整库导出</template>
           <p class="gb-muted">
-            导出文件包含 6 张业务表全量数据与结构版本号，可在其他设备通过「导入 JSON」还原。
+            导出文件包含 7 张业务表（含检测室脱酸处理单）全量数据与结构版本号，可在其他设备通过「导入 JSON」还原。
           </p>
           <div class="gb-toolbar">
             <el-button :icon="Download" @click="handleExport">JSON 备份</el-button>
@@ -371,12 +405,22 @@ function verdictColor(verdict: string): string {
         </el-form-item>
       </el-form>
       <el-alert
-        v-if="form.verdict === 'pass'"
+        v-if="form.verdict === 'pass' && formGate && (formGate.needCount === 0 || formGate.ready)"
         type="success"
         show-icon
         :closable="false"
-        title="验收合格将触发全册归档，册次锁定为只读"
+        :title="formGate.needCount === 0 ? '该册无需脱酸叶，验收合格将触发全册归档，册次锁定为只读' : `脱酸复测 ${formGate.passedCount}/${formGate.needCount} 叶全部达标；验收合格将触发全册归档`"
       />
+      <el-alert
+        v-else-if="form.verdict === 'pass'"
+        type="error"
+        show-icon
+        :closable="false"
+        title="该册脱酸复测未全部达标，修复室暂不放行装订"
+      >
+        <div style="margin-bottom: 6px">{{ gateBlocksText }}</div>
+        <el-button size="small" text type="primary" @click="dialog = false; $router.push('/deacid')">前往检测室脱酸台账</el-button>
+      </el-alert>
       <el-alert
         v-else
         type="warning"

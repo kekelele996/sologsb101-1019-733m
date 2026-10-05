@@ -5,11 +5,12 @@
  */
 import { computed, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { Brush, Document, Files, Reading, Tools } from '@element-plus/icons-vue'
+import { Brush, Document, Files, MagicStick, Reading, Tools } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import { useBookStore } from '@/stores/bookStore'
 import { useLeafStore } from '@/stores/leafStore'
 import { useRepairStore } from '@/stores/repairStore'
+import { useDeacidStore } from '@/stores/deacidStore'
 import { initDatabase } from '@/utils/db'
 import { useLeafStats } from '@/hooks/useLeafStats'
 
@@ -18,13 +19,20 @@ const router = useRouter()
 const bookStore = useBookStore()
 const leafStore = useLeafStore()
 const repairStore = useRepairStore()
+const deacidStore = useDeacidStore()
 const { totals } = useLeafStats()
 const ready = ref(false)
 
 onMounted(async () => {
   try {
     await initDatabase()
-    await Promise.all([bookStore.loadBooks(), bookStore.loadVolumes(), leafStore.loadLeaves(), repairStore.loadOrders()])
+    await Promise.all([
+      bookStore.loadBooks(),
+      bookStore.loadVolumes(),
+      leafStore.loadLeaves(),
+      repairStore.loadOrders(),
+      deacidStore.loadOrders()
+    ])
   } catch (error) {
     ElMessage.error(`本地数据库初始化失败：${error instanceof Error ? error.message : '未知错误'}`)
   } finally {
@@ -45,6 +53,13 @@ const navItems = computed(() => {
     },
     { path: '/papers', label: '补纸选配', icon: Brush, badge: '', disabled: false },
     { path: '/repairs', label: '修复工序', icon: Tools, badge: String(repairStore.totalSteps), disabled: false },
+    {
+      path: '/deacid',
+      label: '检测脱酸',
+      icon: MagicStick,
+      badge: deacidStore.pendingCount > 0 ? String(deacidStore.pendingCount) : '',
+      disabled: false
+    },
     { path: '/export', label: '装订归档', icon: Files, badge: '', disabled: false }
   ]
 })
