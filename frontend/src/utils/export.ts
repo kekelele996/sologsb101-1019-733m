@@ -8,12 +8,15 @@ import type { Leaf } from '@/types/leaf'
 import type { Paper } from '@/types/paper'
 import type { RepairOrder } from '@/types/repairOrder'
 import type { Binding } from '@/types/binding'
+import type { DeacidRecord } from '@/types/deacidRecord'
 import { BOOK_LEVEL_LABEL } from '@/types/book'
 import { BINDING_TYPE_LABEL, VOLUME_STATE_LABEL } from '@/types/volume'
 import { DAMAGE_TYPE_LABEL, LEAF_STATE_LABEL } from '@/types/leaf'
 import { PAPER_TYPE_LABEL, deltaELevel } from '@/types/paper'
 import { REPAIR_NAME_LABEL } from '@/types/repairOrder'
 import { BINDING_VERDICT_LABEL } from '@/types/binding'
+import { DEACID_METHOD_LABEL, DEACID_STATE_LABEL } from '@/types/deacidRecord'
+import { checkVolumeDeacid, deacidStateOf, latestAttempt } from '@/utils/deacid'
 import type { RestoreSnapshot } from './db'
 
 /** 触发浏览器下载 */
@@ -55,6 +58,12 @@ export interface ExportContext {
   papers: Paper[]
   repairOrders: RepairOrder[]
   bindings: Binding[]
+  deacidRecords: DeacidRecord[]
+}
+
+/** 某叶在检测室台账中的处理单（按叶号对账） */
+function deacidRecordOf(context: ExportContext, volumeId: string, leafNo: number): DeacidRecord | undefined {
+  return context.deacidRecords.find((record) => record.volumeId === volumeId && record.leafNo === leafNo)
 }
 
 /** 验收归档清单文本：按古籍 → 册次 → 书叶 → 工序展开 */
@@ -70,12 +79,14 @@ export function buildArchiveReport(context: ExportContext): string {
     if (volumes.length === 0) lines.push('   （暂无册次）')
     volumes.forEach((volume) => {
       const leaves = context.leaves.filter((leaf) => leaf.volumeId === volume.id)
+      const records = context.deacidRecords.filter((record) => record.volumeId === volume.id)
+      const deacid = checkVolumeDeacid(leaves, records)
       const binding = context.bindings.find((item) => item.volumeId === volume.id)
       const totalArea = Math.round(leaves.reduce((sum, leaf) => sum + leaf.damageAreaCm2, 0) * 10) / 10
       const averagePh =
         leaves.length === 0 ? 0 : Math.round((leaves.reduce((sum, leaf) => sum + leaf.phValue, 0) / leaves.length) * 100) / 100
       lines.push(
-        `   第 ${volume.volumeNo} 册　${BINDING_TYPE_LABEL[volume.bindingType]}　${VOLUME_STATE_LABEL[volume.state]}　叶数 ${volume.leafCount}　破损 ${totalArea} cm²　平均 pH ${averagePh}`
+        `   第 ${volume.volumeNo} 册　${BINDING_TYPE_LABEL[volume.bindingType]}　${VOLUME_STATE_LABEL[volume.state]}　叶数 ${volume.leafCount}　破损 ${totalArea} cm²　平均 pH ${averagePh}　脱酸达标 ${deacid.passed}/${deacid.totalLeafNos}`
       )
       lines.push(
         `      装订验收：${
@@ -87,8 +98,10 @@ export function buildArchiveReport(context: ExportContext): string {
       leaves.forEach((leaf) => {
         const orders = context.repairOrders.filter((order) => order.leafId === leaf.id)
         const done = orders.filter((order) => order.state === 'done').length
+        const record = deacidRecordOf(context, leaf.volumeId, leaf.leafNo)
+        const deacidText = record ? DEACID_STATE_LABEL[deacidStateOf(record)] : '未立单'
         lines.push(
-          `      · 第 ${leaf.leafNo} 叶　${DAMAGE_TYPE_LABEL[leaf.damageType]}　${leaf.damageAreaCm2} cm²　pH ${leaf.phValue}　${LEAF_STATE_LABEL[leaf.state]}　工序 ${done}/${orders.length}`
+          `      · 第 ${leaf.leafNo} 叶　${DAMAGE_TYPE_LABEL[leaf.damageType]}　${leaf.damageAreaCm2} cm²　pH ${leaf.phValue}（原值）　${LEAF_STATE_LABEL[leaf.state]}　脱酸 ${deacidText}　工序 ${done}/${orders.length}`
         )
       })
     })
@@ -104,7 +117,7 @@ export function exportArchiveReport(context: ExportContext): string {
   return filename
 }
 
-/** 书叶破损台账 CSV（含补纸与工序进度） */
+/** 书叶破损台账 CSV（含补纸、工序进度与检测室脱酸台账） */
 export function exportLeafLedgerCsv(context: ExportContext): string {
   const header = [
     '书名',
@@ -112,8 +125,11 @@ export function exportLeafLedgerCsv(context: ExportContext): string {
     '叶号',
     '破损类型',
     '面积(cm²)',
-    'pH',
+    'pH(送检前原值)',
     '书叶状态',
+    '脱酸状态',
+    '最近脱酸方式',
+    '复测pH',
     '补纸纸种',
     '帘纹',
     '厚度(mm)',
@@ -133,6 +149,8 @@ export function exportLeafLedgerCsv(context: ExportContext): string {
         .sort((a, b) => a.leafNo - b.leafNo)
       leaves.forEach((leaf) => {
         const paper = context.papers.find((item) => item.leafId === leaf.id)
+        const record = deacidRecordOf(context, leaf.volumeId, leaf.leafNo)
+        const lastAttempt = record ? latestAttempt(record) : null
         const orders = context.repairOrders
           .filter((order) => order.leafId === leaf.id)
           .sort((a, b) => a.seq - b.seq)
@@ -147,6 +165,9 @@ export function exportLeafLedgerCsv(context: ExportContext): string {
             leaf.damageAreaCm2,
             leaf.phValue,
             LEAF_STATE_LABEL[leaf.state],
+            record ? DEACID_STATE_LABEL[deacidStateOf(record)] : '未立单',
+            lastAttempt ? DEACID_METHOD_LABEL[lastAttempt.method] : '',
+            lastAttempt ? lastAttempt.retestPh : '',
             paper ? PAPER_TYPE_LABEL[paper.paperType] : '未选配',
             paper ? paper.laidPattern : '',
             paper ? paper.thicknessMm : '',

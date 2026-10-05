@@ -2,6 +2,7 @@
 /**
  * /export 装订还原与验收归档
  * 登记装订方式与验收结论，验收合格触发全册归档；支持 JSON 结构版本导入导出。
+ * 装订放行门槛：一册书叶在检测室台账中全部复测达标，修复室才放它进装订。
  * 消费 Binding 及全部模型；复用 <StatBadge>、<EmptyPanel>、<DamageTag>。
  */
 import { computed, reactive, ref } from 'vue'
@@ -14,6 +15,7 @@ import { useLeafStats } from '@/hooks/useLeafStats'
 import { useBookStore } from '@/stores/bookStore'
 import { useLeafStore } from '@/stores/leafStore'
 import { useRepairStore } from '@/stores/repairStore'
+import { useDeacidStore } from '@/stores/deacidStore'
 import {
   BINDING_METHOD_OPTIONS,
   BINDING_VERDICT_COLOR,
@@ -26,6 +28,7 @@ import {
 } from '@/types/binding'
 import { BINDING_TYPE_LABEL, VOLUME_STATE_LABEL, isVolumeLocked } from '@/types/volume'
 import type { Paper } from '@/types/paper'
+import { checkVolumeDeacid } from '@/utils/deacid'
 import {
   DB_NAME,
   DB_VERSION,
@@ -48,6 +51,7 @@ import {
 const bookStore = useBookStore()
 const leafStore = useLeafStore()
 const repairStore = useRepairStore()
+const deacidStore = useDeacidStore()
 const { totals } = useLeafStats()
 const bindingTable = useIdbTable<Binding>((database) => database.bindings, { sortByUpdatedAt: false })
 const paperTable = useIdbTable<Paper>((database) => database.papers, { sortByUpdatedAt: false })
@@ -55,11 +59,16 @@ const paperTable = useIdbTable<Paper>((database) => database.papers, { sortByUpd
 const fileInput = ref<HTMLInputElement | null>(null)
 const lastBackupAt = ref<string | null>(readLastBackupAt())
 
+/** 某册的脱酸放行检查：全叶复测达标才放行装订 */
+function deacidCheckOf(volumeId: string) {
+  return checkVolumeDeacid(leafStore.leavesOfVolume(volumeId), deacidStore.recordsOfVolume(volumeId))
+}
+
 const volumeOptions = computed(() =>
   bookStore.books.flatMap((book) =>
     bookStore.volumesOfBook(book.id).map((volume) => ({
       value: volume.id,
-      label: `《${book.title}》第 ${volume.volumeNo} 册 · ${BINDING_TYPE_LABEL[volume.bindingType]} · ${VOLUME_STATE_LABEL[volume.state]}`,
+      label: `《${book.title}》第 ${volume.volumeNo} 册 · ${BINDING_TYPE_LABEL[volume.bindingType]} · ${VOLUME_STATE_LABEL[volume.state]}${deacidCheckOf(volume.id).ready ? '' : ' · 脱酸未齐'}`,
       locked: isVolumeLocked(volume.state)
     }))
   )
@@ -77,13 +86,17 @@ const stat = computed(() => {
   const pass = list.filter((item) => item.verdict === 'pass').length
   const archived = bookStore.volumes.filter((volume) => volume.state === 'archived').length
   const pendingBinding = bookStore.volumes.filter((volume) => !isVolumeLocked(volume.state)).length
+  const deacidBlocked = bookStore.volumes.filter(
+    (volume) => !isVolumeLocked(volume.state) && !deacidCheckOf(volume.id).ready
+  ).length
   return {
     total: list.length,
     pass,
     rework: list.length - pass,
     passPercent: list.length === 0 ? 0 : Math.round((pass / list.length) * 100),
     archived,
-    pendingBinding
+    pendingBinding,
+    deacidBlocked
   }
 })
 
@@ -93,7 +106,8 @@ const context = computed(() => ({
   leaves: leafStore.leaves,
   papers: paperTable.rows.value,
   repairOrders: repairStore.orders,
-  bindings: bindingTable.rows.value
+  bindings: bindingTable.rows.value,
+  deacidRecords: deacidStore.records
 }))
 
 const archiveText = computed(() => buildArchiveReport(context.value))
@@ -130,6 +144,17 @@ async function submit(): Promise<void> {
   if (!form.volumeId) {
     ElMessage.warning('请选择册次')
     return
+  }
+  // 装订放行门槛：新建（或改挂其他册次）时，该册书叶须在检测室台账全部复测达标
+  const volumeChanged = editing.value !== null && editing.value.volumeId !== form.volumeId
+  if (!editing.value || volumeChanged) {
+    const check = deacidCheckOf(form.volumeId)
+    if (!check.ready) {
+      ElMessage.error(
+        `该册复测未齐（未立单 ${check.missing} 叶 · 待处理 ${check.pending} 叶 · 返工中 ${check.reworking} 叶），修复室暂不放行装订`
+      )
+      return
+    }
   }
   if (editing.value) {
     await bindingTable.update(editing.value.id, { ...form })
@@ -208,7 +233,13 @@ async function handleFile(event: Event): Promise<void> {
     return
   }
   await importSnapshot(parsed as RestoreSnapshot)
-  await Promise.all([bookStore.loadBooks(), bookStore.loadVolumes(), leafStore.loadLeaves(), repairStore.loadOrders()])
+  await Promise.all([
+    bookStore.loadBooks(),
+    bookStore.loadVolumes(),
+    leafStore.loadLeaves(),
+    repairStore.loadOrders(),
+    deacidStore.loadRecords()
+  ])
   ElMessage.success('导入完成，数据已覆盖')
 }
 
@@ -223,7 +254,13 @@ async function handleReset(): Promise<void> {
     return
   }
   await resetDatabase()
-  await Promise.all([bookStore.loadBooks(), bookStore.loadVolumes(), leafStore.loadLeaves(), repairStore.loadOrders()])
+  await Promise.all([
+    bookStore.loadBooks(),
+    bookStore.loadVolumes(),
+    leafStore.loadLeaves(),
+    repairStore.loadOrders(),
+    deacidStore.loadRecords()
+  ])
   ElMessage.success('已清空并重新载入演示数据')
 }
 
@@ -266,6 +303,7 @@ function verdictColor(verdict: string): string {
       <StatBadge label="返修" :value="stat.rework" suffix="条" tone="danger" />
       <StatBadge label="已归档册次" :value="stat.archived" suffix="册" tone="info" />
       <StatBadge label="待装订册次" :value="stat.pendingBinding" suffix="册" tone="warning" />
+      <StatBadge label="脱酸未齐册次" :value="stat.deacidBlocked" suffix="册" tone="danger" />
       <StatBadge label="工序完成率" :value="`${totals.orderPercent}%`" :percent="totals.orderPercent" />
     </div>
 
@@ -328,7 +366,7 @@ function verdictColor(verdict: string): string {
         <el-card shadow="never" style="margin-top: 16px">
           <template #header>整库导出</template>
           <p class="gb-muted">
-            导出文件包含 6 张业务表全量数据与结构版本号，可在其他设备通过「导入 JSON」还原。
+            导出文件包含 7 张业务表全量数据与结构版本号，可在其他设备通过「导入 JSON」还原。
           </p>
           <div class="gb-toolbar">
             <el-button :icon="Download" @click="handleExport">JSON 备份</el-button>
@@ -353,6 +391,23 @@ function verdictColor(verdict: string): string {
             <el-option v-for="item in volumeOptions" :key="item.value" :label="item.label" :value="item.value" />
           </el-select>
         </el-form-item>
+        <el-alert
+          v-if="form.volumeId && !deacidCheckOf(form.volumeId).ready"
+          style="margin-bottom: 14px"
+          type="error"
+          show-icon
+          :closable="false"
+          title="该册脱酸复测未齐，修复室暂不放行装订"
+          :description="`未立单 ${deacidCheckOf(form.volumeId).missing} 叶 · 待处理 ${deacidCheckOf(form.volumeId).pending} 叶 · 返工中 ${deacidCheckOf(form.volumeId).reworking} 叶；请先在「脱酸台账」补齐复测。`"
+        />
+        <el-alert
+          v-else-if="form.volumeId && deacidCheckOf(form.volumeId).totalLeafNos > 0"
+          style="margin-bottom: 14px"
+          type="success"
+          show-icon
+          :closable="false"
+          :title="`全册 ${deacidCheckOf(form.volumeId).totalLeafNos} 叶复测全部达标，可登记装订`"
+        />
         <el-form-item label="装订方式" required>
           <el-select v-model="form.method" style="width: 100%">
             <el-option v-for="item in BINDING_METHOD_OPTIONS" :key="item" :label="item" :value="item" />

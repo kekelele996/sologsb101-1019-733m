@@ -1,8 +1,8 @@
 # 古籍修复工序与补纸配色档案（gbbookrestore）
 
-面向图书馆古籍修复室修复师的本地化档案工具：按叶登记破损状况、选配补纸并逐道记录修复工序，最终还原装订形式并归档验收结论。
+面向图书馆古籍修复室修复师的本地化档案工具：按叶登记破损状况、选配补纸并逐道记录修复工序，最终还原装订形式并归档验收结论；保护科技检测室另立一本脱酸台账，与修复室各记各的、按叶号对账。
 
-核心动作：**建立古籍与册次 → 逐叶登记破损类型与面积 → 选配补纸并做染色比对 → 记录补破托裱等工序 → 登记装订还原与验收归档**。
+核心动作：**建立古籍与册次 → 逐叶登记破损类型与面积 → 送检脱酸并逐轮复测 pH → 选配补纸并做染色比对 → 记录补破托裱等工序 → 全册复测达标后登记装订还原与验收归档**。
 
 纯前端单页应用（Vue 3 + TypeScript + Element Plus + Vite + Pinia + Vue Router），**无后端、无数据库服务、无 API 服务**，全部数据保存在浏览器本地（IndexedDB / Dexie + 少量 localStorage 元数据）。
 
@@ -68,10 +68,11 @@ npm run preview    # 本地预览构建产物（http://localhost:22819）
 | 路由 | 页面 | 主要职责 | 消费模型 |
 | --- | --- | --- | --- |
 | `/books` | 古籍与册次台账 | 新建古籍、按年代与保护级别筛选（同步 URL query），对话框内管理册次，装订完成后整册锁定只读 | Book、Volume |
-| `/books/:id/leaves` | 书叶破损登记 | 册次切换、逐叶录入破损类型（可叠加）、面积与 pH，批量改状态；**直接深链不存在的 id 显示友好空态** | Leaf、Volume |
+| `/books/:id/leaves` | 书叶破损登记 | 册次切换、逐叶录入破损类型（可叠加）、面积与 pH（送检前原值），批量改状态；**直接深链不存在的 id 显示友好空态**；只读旧记录不可改 | Leaf、Volume |
+| `/deacid` | 脱酸台账与对账（检测室） | 按叶号立处理单、逐轮登记脱酸方式与复测 pH，不合格退回返工按本侧重试；叶号对账摆出待认领 | DeacidRecord、Leaf、Volume |
 | `/papers` | 补纸选配与染色比对 | 按 ΔE 升序排列候选补纸、帘纹匹配度与综合评分，ΔE 超阈值提示重新染色 | Paper、Leaf |
 | `/repairs` | 修复工序记录 | 拖拽调整工序先后并重编号、回填材料与操作人，完成即回写书叶状态，一键生成标准序列 | RepairOrder、Leaf |
-| `/export` | 装订还原与验收归档 | 装订登记 + 验收结论（合格触发全册归档）、JSON 导入导出、归档清单与破损台账 CSV | Binding 及全部模型 |
+| `/export` | 装订还原与验收归档 | 装订登记（**全册复测达标才放行**）+ 验收结论（合格触发全册归档）、JSON 导入导出、归档清单与破损台账 CSV | Binding 及全部模型 |
 
 `/` 与未匹配路径重定向到 `/books`。筛选条件写入 URL query（`?kw=&damageType=&state=` 等），可从任意设备复用链接。
 
@@ -83,12 +84,16 @@ npm run preview    # 本地预览构建产物（http://localhost:22819）
 | --- | --- | --- | --- |
 | Book 古籍 | `src/types/book.ts` | `id` `title` `edition` `era` `volumeCount` `collectionNo` `level`（一级/二级/三级/普通） | 新建后进入册次登记，卡片回显待修叶数与已完成工序数 |
 | Volume 册次 | `src/types/volume.ts` | `id` `bookId` `volumeNo` `leafCount` `bindingType`（线装/蝴蝶装/包背装） `state`（待修复/修复中/已装订/已归档） | 装订完成后整册锁定为只读 |
-| Leaf 书叶 | `src/types/leaf.ts` | `id` `volumeId` `leafNo` `damageType`（虫蛀/酸化/絮化/缺肉/水渍） `damageAreaCm2` `phValue` `state`（待修/修复中/已修复） | 同叶可叠加多种破损，按册汇总面积与平均 pH |
+| Leaf 书叶 | `src/types/leaf.ts` | `id` `volumeId` `leafNo` `damageType`（虫蛀/酸化/絮化/缺肉/水渍） `damageAreaCm2` `phValue` `state`（待修/修复中/已修复） `readonly` | 同叶可叠加多种破损，按册汇总面积与平均 pH；`phValue` 永远是送检前原值，不用复测值回盖；`readonly` 为迁移遗留只读 |
+| DeacidRecord 脱酸处理单 | `src/types/deacidRecord.ts` | `id` `volumeId` `leafNo` `prePh`（原值快照） `source`（历史拆分/检测登记） `attempts[]`（每轮：脱酸方式/复测 pH/是否达标/检测人/日期） | 检测室独立台账，按叶号与修复室对账；复测不合格退回返工、按本侧重试轮次递增，修复室工序记录不动 |
 | Paper 补纸 | `src/types/paper.ts` | `id` `leafId` `paperType`（竹纸/皮纸/宣纸） `laidPattern` `thicknessMm` `deltaE` `dyeRecipe` | 按色差排序候选，ΔE 超阈值提示重新染色 |
 | RepairOrder 修复工序 | `src/types/repairOrder.ts` | `id` `leafId` `seq` `name`（补破/托裱/溜口/裁齐/压平） `material` `operator` `date` `state`（未开始/进行中/已完成） | 拖拽调序，完成即回写书叶状态 |
 | Binding 装订 | `src/types/binding.ts` | `id` `volumeId` `method` `finishDate` `verdict`（合格/返修） `inspector` | 合格触发全册归档，返修退回修复中 |
 
-数据结构版本号 `DB_VERSION` 定义在 `src/utils/db.ts`，当前为 `v2`：`papers` 表增加 `dyeRecipe` 字段，并在 Dexie `.upgrade()` 中按纸种回填默认染色配方（竹纸 / 皮纸 / 宣纸 各有基准配方）。
+数据结构版本号 `DB_VERSION` 定义在 `src/utils/db.ts`，当前为 `v3`：
+
+- `v1 → v2`：`papers` 表增加 `dyeRecipe` 字段，并在 Dexie `.upgrade()` 中按纸种回填默认染色配方（竹纸 / 皮纸 / 宣纸 各有基准配方）。
+- `v2 → v3`：新增 `deacidRecords` 脱酸台账表；旧数据没有处理单，升级时照书叶现有 pH 逐叶拆一份历史处理单（同一叶号只拆一份，检测室那份先留空），复测补齐前这批册子不给装订；没有原值 pH 可依据、拆不出的书叶置为 `readonly` 只读留着。导入旧版 JSON 备份（无 `deacidRecords` 集合）时走同一套拆分规则。
 
 ---
 
@@ -98,13 +103,13 @@ npm run preview    # 本地预览构建产物（http://localhost:22819）
 sologsb101-1019/
 ├── frontend/                     # 前端源码
 │   ├── src/
-│   │   ├── types/                # book.ts volume.ts leaf.ts paper.ts repairOrder.ts binding.ts
-│   │   ├── stores/               # bookStore.ts leafStore.ts repairStore.ts
+│   │   ├── types/                # book.ts volume.ts leaf.ts deacidRecord.ts paper.ts repairOrder.ts binding.ts
+│   │   ├── stores/               # bookStore.ts leafStore.ts repairStore.ts deacidStore.ts
 │   │   ├── components/common/    # DamageTag.vue FilterBar.vue StatBadge.vue EmptyPanel.vue
 │   │   ├── hooks/                # useLeafStats.ts useIdbTable.ts
-│   │   ├── pages/                # BookList.vue LeafBoard.vue PaperMatch.vue RepairWorkflow.vue ExportView.vue
+│   │   ├── pages/                # BookList.vue LeafBoard.vue DeacidLab.vue PaperMatch.vue RepairWorkflow.vue ExportView.vue
 │   │   ├── router/               # index.ts
-│   │   ├── utils/                # paperColor.ts db.ts export.ts
+│   │   ├── utils/                # paperColor.ts deacid.ts db.ts export.ts
 │   │   ├── styles/               # main.css
 │   │   ├── App.vue main.ts env.d.ts
 │   ├── public/favicon.svg
@@ -124,9 +129,10 @@ sologsb101-1019/
 
 ## 七、数据存储说明
 
-- **IndexedDB（Dexie，数据库名 `gbbookrestore`）**：6 张业务表 `books` / `volumes` / `leaves` / `papers` / `repairOrders` / `bindings`，由 `src/utils/db.ts` 统一定义 schema、版本号与升级迁移；`initDatabase()` 首次打开时自动播种**三层互相引用**的演示数据（Book → Volume → Leaf → Paper / RepairOrder，另有 Volume → Binding，固定 id 如 `book_01`、`vol_0101`、`leaf_010101`），保证 `/books/:id/leaves` 深链能命中真实 id，播种幂等。
+- **IndexedDB（Dexie，数据库名 `gbbookrestore`）**：7 张业务表 `books` / `volumes` / `leaves` / `papers` / `repairOrders` / `bindings` / `deacidRecords`，由 `src/utils/db.ts` 统一定义 schema、版本号与升级迁移；`initDatabase()` 首次打开时自动播种**三层互相引用**的演示数据（Book → Volume → Leaf → Paper / RepairOrder，另有 Volume → Binding 与检测室脱酸处理单，固定 id 如 `book_01`、`vol_0101`、`leaf_010101`、`deacid_010101`），保证 `/books/:id/leaves` 深链能命中真实 id，播种幂等。
+- **两室分账**：修复室的 `leaves.phValue` 只存送检前原值；检测室的 `deacidRecords` 另记脱酸方式与逐轮复测 pH，不回写书叶。一册书叶全部复测达标（pH ≥ 7.0）修复室才放行装订；复测不合格的叶在检测室台账内返工重试，修复室工序记录不动。两边按叶号对账，对不上的叶号在 `/deacid` 页摆出来等人认领。
 - **localStorage**：仅存元数据 —— `gbbookrestore:db-version`（本地结构版本）、`gbbookrestore:last-backup-at`（最近导出时间）、`gbbookrestore:ui-prefs`（当前古籍 / 册次、工序排序方式）。
-- **备份**：`/export` 页可导出 JSON（6 张表全量数据 + 结构版本号），导入时校验 `app` 字段与各集合数组完整性，覆盖导入前二次确认；另有归档清单 TXT 与书叶破损台账 CSV。
+- **备份**：`/export` 页可导出 JSON（7 张表全量数据 + 结构版本号），导入时校验 `app` 字段与各集合数组完整性，覆盖导入前二次确认；另有归档清单 TXT 与书叶破损台账 CSV（含脱酸状态与复测 pH）。
 - **隐私与无状态**：数据不上传任何服务器，容器不挂载命名卷；清理浏览器站点数据或更换浏览器会丢失档案，请定期导出备份。
 
 ---

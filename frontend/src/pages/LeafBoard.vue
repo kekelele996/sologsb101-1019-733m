@@ -2,6 +2,7 @@
 /**
  * /books/:id/leaves 书叶破损登记
  * 逐叶录入破损类型、面积与 pH；支持册次切换、批量改状态与深链（查不到 id 给友好空态）。
+ * pH 一律是送检前原值：脱酸复测结果记在检测室台账（/deacid），不回写本页。
  * 消费 Leaf、Volume；复用 <DamageTag>、<FilterBar>、<StatBadge>、<EmptyPanel>。
  */
 import { computed, reactive, ref, watch, watchEffect } from 'vue'
@@ -16,6 +17,7 @@ import { useIdbTable } from '@/hooks/useIdbTable'
 import { useLeafStats } from '@/hooks/useLeafStats'
 import { useBookStore } from '@/stores/bookStore'
 import { useLeafStore } from '@/stores/leafStore'
+import { useDeacidStore } from '@/stores/deacidStore'
 import { PAPER_TYPE_LABEL, type Paper } from '@/types/paper'
 import {
   DAMAGE_TYPE_OPTIONS,
@@ -29,7 +31,9 @@ import {
   type LeafDraft,
   type LeafState
 } from '@/types/leaf'
+import { DEACID_STATE_COLOR, DEACID_STATE_LABEL } from '@/types/deacidRecord'
 import { BINDING_TYPE_LABEL, VOLUME_STATE_LABEL, isVolumeLocked } from '@/types/volume'
+import { deacidStateOf } from '@/utils/deacid'
 import { useRepairStore } from '@/stores/repairStore'
 
 const route = useRoute()
@@ -37,6 +41,7 @@ const router = useRouter()
 const bookStore = useBookStore()
 const leafStore = useLeafStore()
 const repairStore = useRepairStore()
+const deacidStore = useDeacidStore()
 const { statOf } = useLeafStats()
 const paperTable = useIdbTable<Paper>((database) => database.papers, { sortByUpdatedAt: false })
 
@@ -151,6 +156,10 @@ async function submit(): Promise<void> {
 }
 
 async function remove(leaf: Leaf): Promise<void> {
+  if (leaf.readonly) {
+    ElMessage.warning('该记录为旧数据遗留，只读不可删')
+    return
+  }
   try {
     await ElMessageBox.confirm(`将删除第 ${leaf.leafNo} 叶的该条破损记录及其补纸、工序记录。`, '删除书叶记录', {
       type: 'warning',
@@ -165,6 +174,10 @@ async function remove(leaf: Leaf): Promise<void> {
 }
 
 async function advance(leaf: Leaf): Promise<void> {
+  if (leaf.readonly) {
+    ElMessage.warning('该记录为旧数据遗留，只读不可改状态')
+    return
+  }
   await leafStore.advanceLeafState(leaf.id)
   ElMessage.success(`第 ${leaf.leafNo} 叶状态已推进`)
 }
@@ -180,6 +193,23 @@ async function applyBatchState(): Promise<void> {
   )
   ElMessage.success(`已批量改为${LEAF_STATE_LABEL[batchState.value]}`)
   selected.value = []
+}
+
+/** 只读旧记录不参与批量勾选 */
+function selectableRow(row: Leaf): boolean {
+  return !row.readonly
+}
+
+/** 该叶在检测室台账的复测情况（只读展示，不回写原值） */
+function deacidTag(leaf: Leaf): { label: string; color: string } | null {
+  const record = deacidStore.recordOfLeafNo(leaf.volumeId, leaf.leafNo)
+  if (!record) return null
+  const state = deacidStateOf(record)
+  const last = record.attempts[record.attempts.length - 1]
+  return {
+    label: last ? `${DEACID_STATE_LABEL[state]} ${last.retestPh}` : DEACID_STATE_LABEL[state],
+    color: DEACID_STATE_COLOR[state]
+  }
 }
 
 function handleSelectionChange(list: Leaf[]): void {
@@ -229,7 +259,7 @@ function stateColor(state: string): string {
         <div>
           <h2>书叶破损登记{{ book ? ` · 《${book.title}》` : '' }}</h2>
           <p>
-            逐叶录入破损类型、面积与 pH；同一叶号可登记多条叠加破损。
+            逐叶录入破损类型、面积与 pH；同一叶号可登记多条叠加破损。pH 为送检前原值，脱酸复测以检测室台账为准、不回写。
             <el-button text type="primary" @click="router.push('/books')">返回古籍台账</el-button>
           </p>
         </div>
@@ -307,7 +337,7 @@ function stateColor(state: string): string {
         />
 
         <el-table v-else :data="rows" size="small" border @selection-change="handleSelectionChange">
-          <el-table-column type="selection" width="44" />
+          <el-table-column type="selection" width="44" :selectable="selectableRow" />
           <el-table-column prop="leafNo" label="叶号" width="80" sortable />
           <el-table-column label="破损类型" width="150">
             <template #default="{ row }">
@@ -315,7 +345,7 @@ function stateColor(state: string): string {
             </template>
           </el-table-column>
           <el-table-column prop="damageAreaCm2" label="破损面积(cm²)" width="130" sortable />
-          <el-table-column label="pH" width="150">
+          <el-table-column label="pH（送检前原值）" width="170">
             <template #default="{ row }">
               {{ row.phValue }}
               <el-tag :style="{ color: phTag(row.phValue).color, borderColor: `${phTag(row.phValue).color}66` }" effect="plain" size="small" round>
@@ -323,10 +353,27 @@ function stateColor(state: string): string {
               </el-tag>
             </template>
           </el-table-column>
-          <el-table-column label="状态" width="110">
+          <el-table-column label="脱酸复测（检测室）" width="150">
+            <template #default="{ row }">
+              <el-tag
+                v-if="deacidTag(row)"
+                :style="{ color: deacidTag(row)!.color, borderColor: `${deacidTag(row)!.color}66` }"
+                effect="plain"
+                size="small"
+                round
+              >
+                {{ deacidTag(row)!.label }}
+              </el-tag>
+              <span v-else class="gb-muted">未立单</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="状态" width="130">
             <template #default="{ row }">
               <el-tag :style="{ color: stateColor(row.state), borderColor: `${stateColor(row.state)}66` }" effect="plain" round>
                 {{ stateLabel(row.state) }}
+              </el-tag>
+              <el-tag v-if="row.readonly" style="margin-left: 4px" type="info" effect="plain" size="small" round>
+                只读
               </el-tag>
             </template>
           </el-table-column>
@@ -343,10 +390,10 @@ function stateColor(state: string): string {
           </el-table-column>
           <el-table-column label="操作" min-width="260">
             <template #default="{ row }">
-              <el-button size="small" text type="primary" @click="advance(row)">推进状态</el-button>
+              <el-button size="small" text type="primary" :disabled="locked || row.readonly" @click="advance(row)">推进状态</el-button>
               <el-button size="small" text @click="addLeafRecord(row)">叠加破损</el-button>
-              <el-button size="small" text :disabled="locked" :icon="Edit" @click="openEdit(row)">编辑</el-button>
-              <el-button size="small" text type="danger" :icon="Delete" @click="remove(row)">删除</el-button>
+              <el-button size="small" text :disabled="locked || row.readonly" :icon="Edit" @click="openEdit(row)">编辑</el-button>
+              <el-button size="small" text type="danger" :disabled="row.readonly" :icon="Delete" @click="remove(row)">删除</el-button>
             </template>
           </el-table-column>
         </el-table>

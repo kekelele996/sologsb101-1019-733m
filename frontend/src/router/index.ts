@@ -1,6 +1,6 @@
 /**
- * 路由表（与提示词逐字一致）
- * /books、/books/:id/leaves、/papers、/repairs、/export
+ * 路由表
+ * /books、/books/:id/leaves、/deacid、/papers、/repairs、/export
  */
 import { createRouter, createWebHistory, type RouteRecordRaw } from 'vue-router'
 
@@ -20,6 +20,12 @@ const routes: RouteRecordRaw[] = [
     name: 'leaf-board',
     component: () => import('@/pages/LeafBoard.vue'),
     meta: { title: '书叶破损登记', icon: 'Document' }
+  },
+  {
+    path: '/deacid',
+    name: 'deacid-lab',
+    component: () => import('@/pages/DeacidLab.vue'),
+    meta: { title: '脱酸台账与对账', icon: 'Notebook' }
   },
   {
     path: '/papers',

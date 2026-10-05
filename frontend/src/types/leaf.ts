@@ -19,10 +19,12 @@ export interface Leaf {
   damageType: DamageType;
   /** 破损面积 cm² */
   damageAreaCm2: number;
-  /** 酸化 pH 值 */
+  /** 酸化 pH 值（送检前原值；脱酸复测结果记在检测室台账，不回写本字段） */
   phValue: number;
   /** 当前状态 */
   state: LeafState;
+  /** 旧数据升级时拆不出历史处理单的记录置为只读，仅可查阅 */
+  readonly?: boolean;
   createdAt: number;
   updatedAt: number;
 }
